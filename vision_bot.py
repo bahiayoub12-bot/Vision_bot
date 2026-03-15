@@ -629,7 +629,6 @@ class VisionBotGUI:
 
     def __init__(self) -> None:
         self._config     = ConfigManager()
-        self._agent      = VisionAgent(self._config, log_callback=self._safe_log)
         self._stop_event = threading.Event()
 
         self._root = tk.Tk()
@@ -640,6 +639,9 @@ class VisionBotGUI:
         self._root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build_ui()
+
+        # إنشاء الوكيل بعد بناء الواجهة حتى يكون _root و _log_text جاهزَين
+        self._agent = VisionAgent(self._config, log_callback=self._safe_log)
 
     # ── بناء الواجهة ─────────────────────────────────────────────────
 
@@ -694,9 +696,10 @@ class VisionBotGUI:
         )
 
         # مؤشرات المكتبات
+        _agent_ref = getattr(self, "_agent", None)
         libs = [
-            ("PyAutoGUI", self._agent._pag is not None),
-            ("Pillow",    self._agent._PIL is not None),
+            ("PyAutoGUI", _agent_ref is not None and _agent_ref._pag is not None),
+            ("Pillow",    _agent_ref is not None and _agent_ref._PIL is not None),
         ]
         x_pos = 900
         for name, ok in reversed(libs):
