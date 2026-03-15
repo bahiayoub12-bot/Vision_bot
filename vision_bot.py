@@ -334,7 +334,9 @@ class GeminiClient(BaseLLMClient):
 
 
             response = model.generate_content([img, user_msg])
-            result = LLMResponseParser.parse(response.text)
+            raw_text = response.text
+            self._log(f"🔍 رد Gemini الخام: {raw_text[:400]}", "INFO")
+            result = LLMResponseParser.parse(raw_text)
             
             # تصحيح الإحداثيات تلقائياً إذا كانت مناسبة للصورة وليس الشاشة
             if result.get("action") in ("click", "double_click", "right_click", "move"):
