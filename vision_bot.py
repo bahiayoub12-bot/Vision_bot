@@ -773,7 +773,7 @@ class VisionBotGUI:
 
         self._root = tk.Tk()
         self._root.title(f"🤖 VisionBot v{VERSION} — وكيل الذكاء الاصطناعي")
-        self._root.geometry("960x680")
+        self._root.geometry("960x850")
         self._root.configure(bg=self.C["bg"])
         self._root.resizable(True, True)
         self._root.protocol("WM_DELETE_WINDOW", self._on_close)
