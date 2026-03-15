@@ -305,20 +305,49 @@ class GeminiClient(BaseLLMClient):
         try:
             import google.generativeai as genai
             from PIL import Image
+            import PIL.Image
 
             genai.configure(api_key=self.api_key)
+            
+            # استخدام gemini-1.5-flash كنموذج افتراضي إذا لم يُحدد
+            model_name = self.model if self.model else "gemini-1.5-flash"
+            
             model = genai.GenerativeModel(
-                model_name    = self.model,
+                model_name = model_name,
                 system_instruction = self.SYSTEM_PROMPT,
             )
 
             img_bytes = base64.b64decode(screenshot_b64)
-            img       = Image.open(io.BytesIO(img_bytes))
+            img = PIL.Image.open(io.BytesIO(img_bytes))
+            
+            # الحصول على أبعاد الشاشة الفعلية لتصحيح الإحداثيات
+            import pyautogui
+            screen_w, screen_h = pyautogui.size()
+            img_w, img_h = img.size
+            
+            user_msg = (
+                self._build_user_message(task, history) +
+                f"
 
-            response = model.generate_content(
-                [img, self._build_user_message(task, history)]
+معلومات الشاشة: العرض={screen_w}px الارتفاع={screen_h}px | "
+                f"الصورة: {img_w}x{img_h}px | "
+                f"معامل التحويل X={screen_w/img_w:.3f} Y={screen_h/img_h:.3f}
+"
+                "تأكد أن الإحداثيات x,y تشير لمواضع على الشاشة الفعلية وليس الصورة المصغرة."
             )
-            return LLMResponseParser.parse(response.text)
+
+            response = model.generate_content([img, user_msg])
+            result = LLMResponseParser.parse(response.text)
+            
+            # تصحيح الإحداثيات تلقائياً إذا كانت مناسبة للصورة وليس الشاشة
+            if result.get("action") in ("click", "double_click", "right_click", "move"):
+                rx = result.get("x", 0)
+                ry = result.get("y", 0)
+                if rx <= img_w and ry <= img_h and img_w < screen_w:
+                    result["x"] = int(rx * screen_w / img_w)
+                    result["y"] = int(ry * screen_h / img_h)
+            
+            return result
 
         except ImportError:
             return {"action": "fail", "reason": "مكتبة google-generativeai غير مثبتة — pip install google-generativeai"}
@@ -381,8 +410,8 @@ class VisionAgent:
     def _init_libs(self) -> None:
         try:
             import pyautogui as pag
-            pag.FAILSAFE = self._config.get("failsafe", True)
-            pag.PAUSE    = 0.2
+            pag.FAILSAFE = False  # تعطيل الإيقاف التلقائي عند الزاوية
+            pag.PAUSE    = 0.1
             self._pag = pag
             self._log("✅ PyAutoGUI جاهزة", "INFO")
         except ImportError:
@@ -481,8 +510,14 @@ class VisionAgent:
 
             elif act == "type":
                 text = action.get("text", "")
-                self._pag.write(text, interval=0.04)
-                self._log(f"⌨ كتابة: {text[:40]}", "INFO")
+                try:
+                    import pyperclip
+                    pyperclip.copy(text)
+                    self._pag.hotkey("ctrl", "v")
+                    self._log(f"⌨ كتابة (clipboard): {text[:40]}", "INFO")
+                except ImportError:
+                    self._pag.write(text, interval=0.04)
+                    self._log(f"⌨ كتابة: {text[:40]}", "INFO")
 
             elif act == "hotkey":
                 keys = action.get("keys", [])
@@ -547,7 +582,10 @@ class VisionAgent:
         for step in range(1, max_steps + 1):
             if stop_event.is_set():
                 self._log("🛑 إيقاف المستخدم", "WARNING")
-                break
+                self.is_running = False
+                if done_cb:
+                    done_cb(False, "تم الإيقاف")
+                return
 
             self._log(f"\n── الخطوة {step}/{max_steps} ──────────────────", "INFO")
 
@@ -582,7 +620,12 @@ class VisionAgent:
                 return
 
             # 4. تنفيذ الإجراء
-            self.execute_action(action)
+            act_type = action.get('action', 'unknown')
+            x_val = action.get('x', '؟')
+            y_val = action.get('y', '؟')
+            self._log(f"🎯 سينفذ: {act_type} على ({x_val}, {y_val})", "INFO")
+            result_ok = self.execute_action(action)
+            self._log(f"{'✅ نُفّذ' if result_ok else '❌ فشل التنفيذ'}: {act_type}", 'SUCCESS' if result_ok else 'ERROR')
 
             # 5. انتظار قبل الخطوة التالية
             self._log(f"⏳ انتظار {step_delay}s قبل الخطوة التالية...", "INFO")
@@ -887,7 +930,9 @@ class VisionBotGUI:
 
     def _stop_agent(self) -> None:
         self._stop_event.set()
-        self._set_status("⬤  جاري الإيقاف…", self.C["red"])
+        self._agent.is_running = False
+        self._stop_event.clear()
+        self._set_status("⬤  متوقف — يمكنك إرسال مهمة جديدة", self.C["red"])
 
     def _test_screenshot(self) -> None:
         """يلتقط شاشة تجريبية ويعرض حجمها."""
@@ -953,13 +998,18 @@ class VisionBotGUI:
 
     def _safe_log(self, message: str, level: str = "INFO") -> None:
         """يُضيف رسالة للسجل بأمان من أي thread."""
+        if not hasattr(self, "_root") or not hasattr(self, "_log_text"):
+            return
         def _do() -> None:
-            self._log_text.configure(state="normal")
-            ts  = datetime.now().strftime("%H:%M:%S")
-            tag = "STEP" if message.startswith("──") else level
-            self._log_text.insert("end", f"[{ts}]  {message}\n", tag)
-            self._log_text.see("end")
-            self._log_text.configure(state="disabled")
+            try:
+                self._log_text.configure(state="normal")
+                ts  = datetime.now().strftime("%H:%M:%S")
+                tag = "STEP" if message.startswith("──") else level
+                self._log_text.insert("end", f"[{ts}]  {message}\n", tag)
+                self._log_text.see("end")
+                self._log_text.configure(state="disabled")
+            except Exception:
+                pass
         self._root.after(0, _do)
 
     def _clear_log(self) -> None:
