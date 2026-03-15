@@ -325,16 +325,13 @@ class GeminiClient(BaseLLMClient):
             screen_w, screen_h = pyautogui.size()
             img_w, img_h = img.size
             
-            user_msg = (
-                self._build_user_message(task, history) +
-                f"
-
-معلومات الشاشة: العرض={screen_w}px الارتفاع={screen_h}px | "
-                f"الصورة: {img_w}x{img_h}px | "
-                f"معامل التحويل X={screen_w/img_w:.3f} Y={screen_h/img_h:.3f}
-"
+            screen_info = (
+                "معلومات الشاشة: العرض=" + str(screen_w) + "px الارتفاع=" + str(screen_h) + "px | " +
+                "الصورة: " + str(img_w) + "x" + str(img_h) + "px | " +
                 "تأكد أن الإحداثيات x,y تشير لمواضع على الشاشة الفعلية وليس الصورة المصغرة."
             )
+            user_msg = self._build_user_message(task, history) + "\n\n" + screen_info
+
 
             response = model.generate_content([img, user_msg])
             result = LLMResponseParser.parse(response.text)
