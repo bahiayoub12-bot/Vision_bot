@@ -31,6 +31,102 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
 # ══════════════════════════════════════════════════════════════════════
+# مسجل الحركات
+# ══════════════════════════════════════════════════════════════════════
+
+class MacroRecorder:
+    """يسجل حركات الماوس والنقرات ويعيد تشغيلها."""
+
+    def __init__(self) -> None:
+        self._events: list = []
+        self._recording  = False
+        self._listener   = None
+        self._start_time = 0.0
+
+    def start(self) -> None:
+        """يبدأ تسجيل الحركات."""
+        try:
+            from pynput import mouse
+        except ImportError:
+            raise ImportError("pip install pynput")
+
+        self._events    = []
+        self._recording = True
+        self._start_time = time.time()
+
+        def on_move(x, y):
+            if self._recording:
+                t = time.time() - self._start_time
+                self._events.append(("move", x, y, t))
+
+        def on_click(x, y, button, pressed):
+            if self._recording and pressed:
+                t = time.time() - self._start_time
+                btn = "left" if str(button) == "Button.left" else "right"
+                self._events.append(("click", x, y, btn, t))
+
+        def on_scroll(x, y, dx, dy):
+            if self._recording:
+                t = time.time() - self._start_time
+                self._events.append(("scroll", x, y, dy, t))
+
+        self._listener = mouse.Listener(
+            on_move=on_move, on_click=on_click, on_scroll=on_scroll)
+        self._listener.start()
+
+    def stop(self) -> int:
+        """يوقف التسجيل ويعيد عدد الأحداث المسجلة."""
+        self._recording = False
+        if self._listener:
+            self._listener.stop()
+            self._listener = None
+        return len(self._events)
+
+    def play(self, speed: float = 1.0) -> None:
+        """يعيد تشغيل الأحداث المسجلة."""
+        try:
+            import pyautogui
+        except ImportError:
+            raise ImportError("pip install pyautogui")
+
+        if not self._events:
+            return
+
+        prev_t = 0.0
+        for event in self._events:
+            t = event[-1]
+            delay = (t - prev_t) / speed
+            if delay > 0:
+                time.sleep(min(delay, 2.0))
+            prev_t = t
+
+            if event[0] == "move":
+                _, x, y, _ = event
+                pyautogui.moveTo(x, y, duration=0.05)
+            elif event[0] == "click":
+                _, x, y, btn, _ = event
+                pyautogui.click(x, y, button=btn)
+            elif event[0] == "scroll":
+                _, x, y, dy, _ = event
+                pyautogui.scroll(int(dy * 3), x=x, y=y)
+
+    def save(self, path: str) -> None:
+        import json as _json
+        with open(path, "w", encoding="utf-8") as f:
+            _json.dump(self._events, f)
+
+    def load(self, path: str) -> int:
+        import json as _json
+        with open(path, encoding="utf-8") as f:
+            self._events = _json.load(f)
+        return len(self._events)
+
+    @property
+    def has_events(self) -> bool:
+        return len(self._events) > 0
+
+
+# ══════════════════════════════════════════════════════════════════════
 # الثوابت
 # ══════════════════════════════════════════════════════════════════════
 
@@ -672,6 +768,8 @@ class VisionBotGUI:
     def __init__(self) -> None:
         self._config     = ConfigManager()
         self._stop_event = threading.Event()
+        self._recorder   = MacroRecorder()
+        self._macro_file = Path("vision_macro.json")
 
         self._root = tk.Tk()
         self._root.title(f"🤖 VisionBot v{VERSION} — وكيل الذكاء الاصطناعي")
@@ -855,6 +953,44 @@ class VisionBotGUI:
         self._btn(run_frame, "📸  التقاط شاشة تجريبي",
                   self._test_screenshot, font_size=9).pack(fill="x", pady=2)
 
+        # ── قسم تسجيل الحركات ──
+        self._section(parent, "◈  تسجيل الحركات")
+
+        rec_frame = tk.Frame(parent, bg=self.C["panel"])
+        rec_frame.pack(fill="x", padx=12, pady=6)
+
+        self._rec_btn = self._btn(
+            rec_frame, "🔴  بدء التسجيل", self._start_recording, "red", 11)
+        self._rec_btn.pack(fill="x", pady=2)
+
+        self._stop_rec_btn = self._btn(
+            rec_frame, "⏹  إيقاف التسجيل", self._stop_recording, "btn", 11)
+        self._stop_rec_btn.pack(fill="x", pady=2)
+        self._stop_rec_btn.configure(state="disabled")
+
+        self._play_rec_btn = self._btn(
+            rec_frame, "▶▶  تشغيل التسجيل", self._play_recording, "green", 11)
+        self._play_rec_btn.pack(fill="x", pady=2)
+        self._play_rec_btn.configure(state="disabled")
+
+        self._rec_status = tk.Label(
+            rec_frame,
+            text="لا يوجد تسجيل",
+            font=("Consolas", 8),
+            bg=self.C["panel"], fg=self.C["muted"]
+        )
+        self._rec_status.pack(pady=2)
+
+        # تحميل تسجيل سابق إن وجد
+        if self._macro_file.exists():
+            try:
+                n = self._recorder.load(str(self._macro_file))
+                self._rec_status.configure(
+                    text=f"تسجيل محفوظ: {n} حدث", fg=self.C["green"])
+                self._play_rec_btn.configure(state="normal")
+            except Exception:
+                pass
+
     def _build_log_panel(self, parent: tk.Frame) -> None:
         """لوحة السجل اليمنى."""
 
@@ -944,6 +1080,57 @@ class VisionBotGUI:
             self._safe_log("❌ فشل الالتقاط", "ERROR")
 
     # ── الإعدادات ─────────────────────────────────────────────────────
+
+    # ── منطق تسجيل الحركات ──────────────────────────────────────────
+
+    def _start_recording(self) -> None:
+        try:
+            self._recorder.start()
+            self._rec_btn.configure(state="disabled")
+            self._stop_rec_btn.configure(state="normal")
+            self._play_rec_btn.configure(state="disabled")
+            self._rec_status.configure(
+                text="🔴 جاري التسجيل...", fg=self.C["red"])
+            self._safe_log("🔴 بدأ تسجيل الحركات — قم بحركاتك الآن", "WARNING")
+        except ImportError:
+            import subprocess
+            subprocess.run(["pip", "install", "pynput"], check=False)
+            self._safe_log("⚠️ جاري تثبيت pynput — أعد المحاولة", "WARNING")
+
+    def _stop_recording(self) -> None:
+        n = self._recorder.stop()
+        self._rec_btn.configure(state="normal")
+        self._stop_rec_btn.configure(state="disabled")
+        if n > 0:
+            self._recorder.save(str(self._macro_file))
+            self._play_rec_btn.configure(state="normal")
+            self._rec_status.configure(
+                text=f"✅ مسجل: {n} حدث", fg=self.C["green"])
+            self._safe_log(f"✅ تم حفظ التسجيل — {n} حدث", "SUCCESS")
+        else:
+            self._rec_status.configure(text="لا يوجد أحداث", fg=self.C["muted"])
+            self._safe_log("⚠️ لم يتم تسجيل أي حركة", "WARNING")
+
+    def _play_recording(self) -> None:
+        if not self._recorder.has_events:
+            self._safe_log("❌ لا يوجد تسجيل للتشغيل", "ERROR")
+            return
+        self._safe_log("▶▶ جاري تشغيل التسجيل...", "SUCCESS")
+        self._play_rec_btn.configure(state="disabled")
+
+        def _run():
+            try:
+                self._recorder.play(speed=1.0)
+                self._root.after(0, lambda: self._safe_log(
+                    "✅ انتهى تشغيل التسجيل", "SUCCESS"))
+            except Exception as e:
+                self._root.after(0, lambda: self._safe_log(
+                    f"❌ خطأ في التشغيل: {e}", "ERROR"))
+            finally:
+                self._root.after(0, lambda: self._play_rec_btn.configure(
+                    state="normal"))
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _on_provider_change(self) -> None:
         provider = self._provider_var.get()
